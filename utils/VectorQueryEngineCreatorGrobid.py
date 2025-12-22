@@ -158,6 +158,24 @@ class VectorQueryEngineCreatorGrobid(VectorQueryEngineCreator):
                     continue
         return nodes
 
+    def _tei_to_json(self, tei_xml: str) -> Dict[str, Any]:
+        try:
+            from lxml import etree  # type: ignore
+        except Exception:
+            return {}
+        try:
+            root = etree.fromstring((tei_xml or '').encode('utf-8'))
+        except Exception:
+            return {}
+        ns = {'tei': 'http://www.tei-c.org/ns/1.0'}
+        out: Dict[str, Any] = {
+            'title': '',
+            'authors': [],
+            'abstract': '',
+            'sections': [],
+            'references': [],
+            'paragraphs': [],
+        }
         def _text(el) -> str:
             try:
                 return ' '.join((''.join(el.itertext())).split())
@@ -307,6 +325,25 @@ class VectorQueryEngineCreatorGrobid(VectorQueryEngineCreator):
                 out['references'].append({'citation': cit})
         return out
 
+    def _json_to_textnodes(self, data: Dict[str, Any], basename: str) -> List[TextNode]:
+        nodes: List[TextNode] = []
+        # Paragraph list takes precedence if present
+        paras = data.get('paragraphs') or []
+        for pr in paras:
+            try:
+                txt = (pr.get('text') or '').strip()
+                if not txt:
+                    continue
+                md = {'source_file': basename}
+                if pr.get('section'):
+                    md['section'] = pr.get('section')
+                if pr.get('top_section'):
+                    md['top_section'] = pr.get('top_section')
+                if isinstance(pr.get('page'), int):
+                    md['page_label'] = int(pr.get('page'))
+                nodes.append(TextNode(text=txt, metadata=md))
+            except Exception:
+                continue
         def _walk(secs: List[Dict[str, Any]], top_title: str = ''):
             for s in secs or []:
                 title = (s.get('title') or '').strip()
