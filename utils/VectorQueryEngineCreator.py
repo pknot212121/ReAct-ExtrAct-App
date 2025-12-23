@@ -84,6 +84,14 @@ class VectorQueryEngineCreator:
             documents = LlamaParse(
                 api_key=api_key,
                 result_type="markdown",
+                use_vendor_multimodal_model=True,
+                vendor_multimodal_model_name="openai-gpt4o",
+                parsing_instruction="""
+                    This document contains images and charts. 
+                    For every image, diagram, or chart you find, provide a detailed 
+                    textual description of its content and context within the document. 
+                    Place the description directly in the text where the image was located.
+                """,
                 page_separator="\n<!--PAGE:{pageNumber}-->\n",
             ).load_data(path_to_pdf)
             for d in documents:

@@ -467,7 +467,7 @@ def _pick_main_script(mode: str) -> str:
 def _read_api_keys() -> Dict[str, str]:
     # Prefer environment, then in-session, then defaults. Optionally fill from local file.
     data: Dict[str, str] = {}
-    wanted = ['OPENROUTER_API_KEY','OPENAI_API_KEY','LLAMA_CLOUD_API_KEY','OLLAMA_BASE_URL']
+    wanted = ['LLAMA_CLOUD_API_KEY','OLLAMA_BASE_URL']
     for k in wanted:
         v = os.getenv(k) or (st.session_state.get('api_keys', {}).get(k) if 'api_keys' in st.session_state else None) or DEFAULT_API_KEYS.get(k, '')
         data[k] = v if isinstance(v, str) else ''
@@ -517,16 +517,16 @@ def _keys_ready(keys: Dict[str, str]) -> bool:
     # Require Llama Cloud parse always
     if not keys.get('LLAMA_CLOUD_API_KEY'):
         return False
-    try:
-        from config.config import API, EMBEDDING_API
-        api = (API or 'openrouter').strip().lower()
-        eapi = (EMBEDDING_API or 'openai').strip().lower()
-    except Exception:
-        api, eapi = 'openrouter', 'openai'
-    if api == 'openrouter' and not keys.get('OPENROUTER_API_KEY'):
-        return False
-    if eapi == 'openai' and not keys.get('OPENAI_API_KEY'):
-        return False
+    # try:
+    #     from config.config import API, EMBEDDING_API
+    #     api = (API or 'openrouter').strip().lower()
+    #     eapi = (EMBEDDING_API or 'openai').strip().lower()
+    # except Exception:
+    #     api, eapi = 'openrouter', 'openai'
+    # if api == 'openrouter' and not keys.get('OPENROUTER_API_KEY'):
+    #     return False
+    # if eapi == 'openai' and not keys.get('OPENAI_API_KEY'):
+    #     return False
     return True
 
 

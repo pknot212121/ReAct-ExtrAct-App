@@ -13,3 +13,6 @@ llama-index-embeddings-ollama
 streamlit
 llama-index-llms-openrouter
 python-dotenv
+PyMuPDF
+requests
+requests-toolbelt

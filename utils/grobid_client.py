@@ -1,60 +1,10 @@
 import os
+import re
 import time
 from typing import Optional
 
 import requests
 
-
-def grobid_fulltext_tei(pdf_path: str, base_url: Optional[str] = None, timeout: int = 180, retries: int = 2, backoff: float = 1.5) -> str:
-    """
-    Call GROBID /api/processFulltextDocument and return TEI XML as text.
-    Immediately saves the raw TEI to storage/grobid_tei_raw/<pdf_stem>.tei.xml (or GROBID_TEI_SAVE_DIR).
-    """
-    url = (base_url or os.getenv('GROBID_URL') or 'http://localhost:8070').rstrip('/') + '/api/processFulltextDocument'
-    last_err: Optional[Exception] = None
-    for attempt in range(retries + 1):
-        try:
-            with open(pdf_path, 'rb') as f:
-                files = {'input': (os.path.basename(pdf_path), f, 'application/pdf')}
-                data = {
-                    'consolidateHeader': '1',
-                    'consolidateCitations': '0',
-                    'includeRawCitations': '0',
-                    # Request granular coordinates only (no legacy flags)
-                    'teiCoordinates': 'p,head,figure,table,ref,item,row',
-                    'segmentSentences': '1',
-                }
-                resp = requests.post(url, files=files, data=data, timeout=timeout)
-                resp.raise_for_status()
-                tei_text = resp.text
-                # Persist TEI immediately and unconditionally to a stable location for audit
-                try:
-                    save_dir = os.getenv('GROBID_TEI_SAVE_DIR')
-                    if not save_dir:
-                        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-                        save_dir = os.path.join(repo_root, 'storage', 'grobid_tei_raw')
-                    os.makedirs(save_dir, exist_ok=True)
-                    stem = os.path.splitext(os.path.basename(pdf_path))[0]
-                    out_path = os.path.join(save_dir, f"{stem}.tei.xml")
-                    with open(out_path, 'w', encoding='utf-8') as outf:
-                        outf.write(tei_text or '')
-                    # Quick debug: pb/surface presence
-                    try:
-                        pb_cnt = tei_text.count('<pb ')
-                        surf_cnt = tei_text.count('<surface ')
-                        print(f"[grobid-tei-debug] pb={pb_cnt} surface={surf_cnt}")
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-                return tei_text
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(backoff ** attempt)
-            else:
-                raise
-    raise RuntimeError(f"GROBID failed: {last_err}")
 
 
 def tei_to_markdown(tei_xml: str) -> str:
@@ -282,11 +232,11 @@ def sanitize_markdown(md: str) -> str:
 import os
 import time
 from typing import Optional
-
+from requests_toolbelt.multipart import decoder
 import requests
 
 
-def grobid_fulltext_tei(pdf_path: str, base_url: Optional[str] = None, timeout: int = 180, retries: int = 2, backoff: float = 1.5) -> str:
+def grobid_fulltext_tei(pdf_path: str, base_url: Optional[str] = None,assets_path: Optional[str] = None, timeout: int = 180, retries: int = 2, backoff: float = 1.5) -> str:
     """
     Call GROBID /api/processFulltextDocument and return TEI XML as text.
     """
@@ -302,10 +252,29 @@ def grobid_fulltext_tei(pdf_path: str, base_url: Optional[str] = None, timeout: 
                     'includeRawCitations': '0',
                     'teiCoordinates': 'p,head,figure,table,ref,item,row',
                     'segmentSentences': '1',
+                    'generateAssets': '1'
                 }
                 resp = requests.post(url, files=files, data=data, timeout=timeout)
                 resp.raise_for_status()
-                tei_text = resp.text
+                tei_text = ""
+                content_type = resp.headers.get('Content-Type','')
+
+                if 'multipart/form-data' in content_type:
+                    multipart_data = decoder.MultipartDecoder.from_response(resp)
+                    for part in multipart_data.parts:
+                        content_disposition = part.headers.get(b'Content-Disposition',b'').decode()
+                        if 'name="xml"' in content_disposition:
+                            tei_text = part.text
+                        elif assets_path and ('filename="' in content_disposition):
+                            match = re.search('filename="([^"]+)"',content_disposition)
+                            if match:
+                                filename = match.group(1)
+                                os.makedirs(assets_path, exist_ok=True)
+                                out_asset_path = os.path.join(assets_path, filename)
+                                with open(out_asset_path, 'wb') as asset_f:
+                                    asset_f.write(part.content)
+                else:
+                    tei_text = resp.text
                 # Persist TEI immediately and unconditionally to a stable location for audit
                 try:
                     # Allow override via env; otherwise save under <repo>/storage/grobid_tei_raw/

@@ -1,7 +1,10 @@
+import base64
 import os
 import re
+import pymupdf
 from typing import List, Dict, Any
-
+import requests
+from config.config import OLLAMA_BASE_URL
 from utils.VectorQueryEngineCreator import VectorQueryEngineCreator
 
 try:
@@ -19,63 +22,156 @@ except Exception:
     SentenceSplitter = None  # type: ignore
     StorageContext = None  # type: ignore
     load_index_from_storage = None  # type: ignore
-    
+
 
 class VectorQueryEngineCreatorGrobid(VectorQueryEngineCreator):
+
+    def get_figure_desc_ollama(self,img_path: str):
+        url = OLLAMA_BASE_URL
+        if not os.path.exists(img_path):
+            return None
+        try:
+            with open(img_path, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode('utf-8')
+            response = requests.post('http://localhost:11434/api/generate',
+                                json = {
+                                    "model": "qwen3-vl:2b",
+                                    "prompt": "Analize this image and provide a short description - No more than two sentences.",
+                                    "images": [img_b64],
+                                    "stream": False,
+                                    "options": {
+                                        "num_ctx": 1024,
+                                    }
+                                }, timeout=1000)
+            return response.json().get('response','');
+        except Exception as e:
+            return f"Error with image interpretation: {e}"
+
+    def extract_images_from_coords(self,pdf_path, tei_xml, output_dir):
+        import xml.etree.ElementTree as ET
+        NS = '{http://www.tei-c.org/ns/1.0}'
+        root = ET.fromstring(tei_xml.encode('utf-8'))
+
+        doc = pymupdf.open(pdf_path)
+        os.makedirs(output_dir, exist_ok=True)
+
+        image_map = {}
+
+        for i, fig in enumerate(root.findall(f'.//{NS}figure')):
+            graphic = fig.find(f'.//{NS}graphic')
+            if graphic is None: continue
+
+            coords_str = graphic.get('coords')
+            if not coords_str: continue
+            coord_list = coords_str.split(';')[0].split(',')
+            if len(coord_list) < 5: continue
+
+            page_num = int(coord_list[0]) - 1  # GROBID liczy od 1, PyMuPDF od 0
+            x0, y0 = float(coord_list[1]), float(coord_list[2])
+            w, h = float(coord_list[3]), float(coord_list[4])
+
+            try:
+                page = doc[page_num]
+                rect = pymupdf.Rect(x0, y0, x0 + w, y0 + h)
+                pix = page.get_pixmap(clip=rect, matrix=pymupdf.Matrix(2, 2))
+
+                img_filename = f"image-{i}.png"
+                img_path = os.path.join(output_dir, img_filename)
+                pix.save(img_path)
+
+                graphic.set('url', img_filename)
+                image_map[i] = img_path
+            except Exception as e:
+                print(f"Błąd przy wycinaniu grafiki {i}: {e}")
+
+        doc.close()
+        return ET.tostring(root, encoding='unicode')
+
     # ---------- Fresh TEI section extractor (namespace-aware, minimal) ----------
-    def _extract_sections_from_tei(self, tei_xml: str) -> List[Dict[str, str]]:
+    def _extract_sections_from_tei(self, tei_xml: str, assets_path: str = None) -> List[Dict[str, str]]:
         try:
             import xml.etree.ElementTree as ET
+            import os
         except Exception:
             return []
+
         try:
             root = ET.fromstring((tei_xml or '').encode('utf-8'))
-        except Exception:
+        except Exception as e:
+            print(f"Błąd parsowania XML: {e}")
             return []
+
         NS = '{http://www.tei-c.org/ns/1.0}'
         sections: List[Dict[str, str]] = []
+        self.img_counter = 0  # Globalny licznik dla tej sesji parsowania
+
         def _get_text(el) -> str:
             try:
-                return ''.join(el.itertext())
-            except Exception:
+                return ''.join(el.itertext()).strip()
+            except:
                 return ''
-        # Extract figures/tables to attach later
-        figures: List[Dict[str, str]] = []
-        for fig in root.findall(f'.//{NS}figure'):
-            cap = fig.find(f'.//{NS}figDesc')
-            cap_txt = (_get_text(cap) or '').strip()
-            if cap_txt:
-                figures.append({'title': 'Figure', 'content': cap_txt, 'section_type': 'figure'})
-        tables: List[Dict[str, str]] = []
-        for tb in root.findall(f'.//{NS}table'):
-            cells: List[str] = []
-            for row in tb.findall(f'.//{NS}row'):
-                row_text = ' | '.join([(_get_text(c) or '').strip() for c in row.findall(f'.//{NS}cell')])
-                if row_text.strip():
-                    cells.append(row_text)
-            tbl_txt = '\n'.join(cells).strip()
-            if tbl_txt:
-                tables.append({'title': 'Table', 'content': tbl_txt, 'section_type': 'table'})
-        def _collect(div_el):
-            title_el = div_el.find(f'{NS}head')
-            title = _get_text(title_el).strip() if title_el is not None else ''
-            content_parts: List[str] = []
-            for p in div_el.findall(f'.//{NS}p'):
-                txt = _get_text(p).strip()
-                if txt:
-                    content_parts.append(txt)
-            content = '\n\n'.join(content_parts)
-            if title or content:
-                sections.append({'title': title, 'content': content, 'section_type': 'body'})
-            for child in list(div_el):
-                if isinstance(child.tag, str) and child.tag == f'{NS}div':
-                    _collect(child)
+
+        def _process_figure(fig_el):
+            graphic = fig_el.find(f'.//{NS}graphic')
+            if graphic is not None:
+                img_name = graphic.get('url')
+                if not img_name:
+                    img_name = f"image-{self.img_counter}.png"
+
+                full_path = os.path.join(assets_path, img_name)
+
+                if os.path.exists(full_path):
+                    print(f" [VLM-OLLAMA] Processing: {img_name}...")
+                    ollama_desc = self.get_figure_desc_ollama(full_path)
+                    self.img_counter += 1
+
+                    cap_el = fig_el.find(f'.//{NS}figDesc')
+                    cap_txt = _get_text(cap_el)
+
+                    res = f"\n[IMAGE_START: {img_name}]\n"
+                    if cap_txt: res += f"Original: {cap_txt}\n"
+                    res += f"Added: {ollama_desc}\n[IMAGE_END]\n"
+                    return res
+                else:
+                    self.img_counter += 1
+                    print(f" [WARN] File does not exist: {full_path}")
+            return ""
+
+        def _collect_content(el):
+            parts = []
+            for child in el:
+                tag = child.tag if isinstance(child.tag, str) else ""
+
+                if tag == f'{NS}p':
+                    txt = _get_text(child)
+                    if txt: parts.append(txt)
+
+                elif tag == f'{NS}figure' and assets_path:
+                    fig_report = _process_figure(child)
+                    if fig_report:
+                        parts.append(fig_report)
+
+                elif tag == f'{NS}div':
+                    pass
+            return "\n\n".join(parts)
+
         body = root.find(f'.//{NS}text/{NS}body')
         if body is not None:
-            for div in body.findall(f'{NS}div'):
-                _collect(div)
-        sections.extend(figures)
-        sections.extend(tables)
+            for child in body:
+                tag = child.tag if isinstance(child.tag, str) else ""
+
+                if tag == f'{NS}div':
+                    title_el = child.find(f'{NS}head')
+                    title = _get_text(title_el)
+                    content = _collect_content(child)
+                    if title or content:
+                        sections.append({'title': title, 'content': content, 'section_type': 'body'})
+
+                elif tag == f'{NS}figure' and assets_path:
+                    fig_report = _process_figure(child)
+                    if fig_report:
+                        sections.append({'title': 'Figure', 'content': fig_report, 'section_type': 'figure'})
+
         return sections
 
     def _create_hierarchical_nodes(self, sections: List[Dict[str, Any]], chunk_size: int = 512, chunk_overlap: int = 50, basename: str = '') -> List[TextNode]:
@@ -377,8 +473,10 @@ class VectorQueryEngineCreatorGrobid(VectorQueryEngineCreator):
         node_parser = None
         nodes = None
         basename = os.path.basename(path_to_pdf)
+        assets_dir = os.path.join("storage", "assets",basename)
+        os.makedirs(assets_dir,exist_ok=True)
         try:
-            from utils.grobid_client import grobid_fulltext_tei  # type: ignore
+            from utils.grobid_client import grobid_fulltext_tei # type: ignore
         except Exception:
             grobid_fulltext_tei = None
         strict = str(os.getenv('STRICT_GROBID') or '1').strip().lower() in ('1','true','yes','y','on')
@@ -386,10 +484,11 @@ class VectorQueryEngineCreatorGrobid(VectorQueryEngineCreator):
             print(f"[parse] {basename}: using GROBID service")
             if grobid_fulltext_tei is None:
                 raise RuntimeError("GROBID utilities unavailable")
-            tei_xml = grobid_fulltext_tei(path_to_pdf, base_url=os.getenv('GROBID_URL') or None)
+            tei_xml = grobid_fulltext_tei(path_to_pdf, base_url=os.getenv('GROBID_URL') or None,assets_path=assets_dir)
             print(f"[grobid-tei] length={len(tei_xml or '')}")
+            tei_xml_with_urls = self.extract_images_from_coords(path_to_pdf, tei_xml, assets_dir)
             # Extract sections, then chunk
-            sections = self._extract_sections_from_tei(tei_xml)
+            sections = self._extract_sections_from_tei(tei_xml_with_urls,assets_path = assets_dir)
             print(f"[grobid-sections] count={len(sections)} first_titles={[s.get('title','') for s in sections[:3]]}")
             nodes = self._create_hierarchical_nodes(sections, chunk_size=512, chunk_overlap=50, basename=basename)
             node_parser = None
