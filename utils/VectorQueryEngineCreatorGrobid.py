@@ -35,14 +35,14 @@ class VectorQueryEngineCreatorGrobid(VectorQueryEngineCreator):
                 img_b64 = base64.b64encode(f.read()).decode('utf-8')
             response = requests.post('http://localhost:11434/api/generate',
                                 json = {
-                                    "model": "qwen3-vl:2b",
+                                    "model": "gemma3:4b",
                                     "prompt": "Analize this image and provide a short description - No more than two sentences.",
                                     "images": [img_b64],
                                     "stream": False,
                                     "options": {
                                         "num_ctx": 1024,
                                     }
-                                }, timeout=1000)
+                                }, timeout=100000)
             return response.json().get('response','');
         except Exception as e:
             return f"Error with image interpretation: {e}"

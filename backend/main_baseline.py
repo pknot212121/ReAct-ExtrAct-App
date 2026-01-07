@@ -116,7 +116,7 @@ def main():
     elif API == "ollama":
         exec_model = OLLAMA_EXECUTION_MODEL or EXECUTION_MODEL
         print(f"Using Ollama execution model: {exec_model} @ {OLLAMA_BASE_URL} [BASELINE]")
-        Settings.llm = Ollama(model=exec_model, base_url=OLLAMA_BASE_URL)
+        Settings.llm = Ollama(model=exec_model, base_url=OLLAMA_BASE_URL,request_timeout=10000.0, additional_kwargs={"num_ctx": 8192})
     else:
         raise ValueError("Unsupported API. Choose 'openrouter' or 'ollama'.")
 
@@ -158,18 +158,20 @@ def main():
     for file in files:
         if file.lower().endswith('.pdf'):
             pdf_files.append(os.path.splitext(file)[0])
-
+    print(f"DEBUG: Załadowano {len(QUERIES)} pytań z pliku konfiguracyjnego.")
     def process_file(file: str):
         print(f"\nProcessing file: {file}")
         # Choose engine based on USE_GROBID
         use_grobid = str(os.getenv('USE_GROBID') or '0').strip().lower() in ('1','true','yes','y','on')
         EngineCls = VectorQueryEngineCreator
+        print("AAA")
         if use_grobid:
             try:
                 from utils.VectorQueryEngineCreatorGrobid import VectorQueryEngineCreatorGrobid as _G  # type: ignore
                 EngineCls = _G
             except Exception:
                 EngineCls = VectorQueryEngineCreator
+        print("BBB")
         query_engine = EngineCls(
             llama_parse_api_key=LLAMA_CLOUD_API_KEY,
             cohere_api_key=os.getenv('COHERE_API_KEY',''),
@@ -179,9 +181,10 @@ def main():
             embedding_model_name=EMBEDDING_MODEL,
             response_mode='compact',
         ).get_query_engine(file)
-
+        print("CCC")
         def run_one(qi: int):
             q = plain_questions[qi]
+            print("\nProcessing question: ", q)
             topic = q["topic"]
             possible_options = q.get("possible_options", "None")
             question_text = topic
@@ -279,9 +282,11 @@ def main():
             for fut in as_completed(futures):
                 try:
                     results.append(fut.result())
-                except Exception:
-                    # Skip failed question; continue with others
-                    continue
+                    print("Result: " + str(fut.result()))
+                except Exception as e:
+                    print(f"BŁĄD W PYTANIU: {e}")
+                    import traceback
+                    traceback.print_exc()
         order = {plain_questions[i]["topic"]: i for i in range(len(plain_questions))}
         results.sort(key=lambda r: order.get(r["question"], 0))
 
@@ -304,16 +309,23 @@ def main():
             with open(os.path.join(out_dir, f"{file}_baseline_like.json"), "w", encoding="utf-8") as f:
                 import json as _json
                 _json.dump(baseline_like, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"DEBUG ERROR: {e}")
+            import traceback
+            traceback.print_exc()
 
     # Run up to CONCURRENCY files in parallel
     # Start counting from the beginning of question answering
     tracker.start()
     with ThreadPoolExecutor(max_workers=max(1, int(CONCURRENCY) if str(CONCURRENCY).isdigit() else 3)) as pool:
         futures = {pool.submit(process_file, f): f for f in pdf_files}
-        for _ in as_completed(futures):
-            pass
+        for fut in as_completed(futures):
+            try:
+                fut.result()  # To wywali błąd na ekran, jeśli wystąpił w wątku
+            except Exception as e:
+                print(f"KRYTYCZNY BŁĄD PROCESU: {e}")
+                import traceback
+                traceback.print_exc()
 
     raportGenerator.generate_main_report()
     end = time.time()
@@ -325,7 +337,7 @@ def main():
     # Persist token/time usage
     tracker.write_report(output_path)
     rep = tracker.report()
-    print(f"Token usage → LLM: {rep.get('total_llm_token_count')} | Embed: {rep.get('total_embedding_token_count')} | Total: {rep.get('total_token_count')}")
+    #print(f"Token usage → LLM: {rep.get('total_llm_token_count')} | Embed: {rep.get('total_embedding_token_count')} | Total: {rep.get('total_token_count')}")
     print(f"Usage report: {os.path.join(output_path, 'usage.json')}")
     return
 
